@@ -470,7 +470,7 @@ function freshState() {
     settings: {
       theme: 'auto', pinHash: null, pinSalt: null, faceCred: null, lockAfter: 1,
       lastScanAt: null, lastSlipAt: null, seenHashes: [], defaultAccount: null,
-      onboarded: false, sample: false, installHintHidden: false, lastBackupAt: null, ledger: 'personal', nwIncludeSavings: false
+      onboarded: false, sample: false, installHintHidden: false, lastBackupAt: null, ledger: 'personal', nwIncludeSavings: false, autoPrompt: true, promptSnooze: null
     },
     accounts: [], categories: defaultCategories(), txns: [], installments: [], loans: [],
     members: [], recurring: [], budgets: {}, learn: {}, learnVia: {}
@@ -1835,6 +1835,7 @@ SCREENS.scanSettings = () => {
     <div class="field"><span class="lbl">สแกนล่าสุด</span><span class="flex-1 text-right">${s.lastScanAt ? fmtDate(s.lastScanAt, { time: true }) : '-'}</span></div>
     <div class="field"><span class="lbl">สลิปล่าสุดที่บันทึก</span><span class="flex-1 text-right">${s.lastSlipAt ? fmtDate(s.lastSlipAt, { time: true }) : '-'}</span></div>
     <div class="field"><span class="lbl">รูปที่ตรวจแล้ว</span><span class="flex-1 text-right">${s.seenHashes.length} รูป</span></div>
+    <div class="row"><span class="flex-1 flex flex-col"><span class="text-[15px]">ถามหาสลิปเมื่อเปิดแอป</span><span class="tiny muted">เมื่อไม่ได้สแกนมาเกิน 2 ชั่วโมง</span></span>${switchBtn(s.autoPrompt !== false, 'toggleAutoPrompt', 'ถามหาสลิปเมื่อเปิดแอป')}</div>
     <div class="row"><span class="flex-1 text-[15px]">บัญชีเริ่มต้น</span><select class="bg-transparent outline-none text-right" style="font-size:15px;max-width:55%" data-c="defaultAccount"><option value="">ไม่ระบุ</option>${accountsFor('personal', (a) => a.type !== 'paylater').map((a) => `<option value="${a.id}" ${s.defaultAccount === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></div>
   </div>
   <p class="tiny muted px-1 mt-2 leading-relaxed">แอปจำว่าเคยตรวจรูปไหนไปแล้ว (จากลายนิ้วมือของไฟล์) และสลิปไหนบันทึกแล้ว (จากเลขอ้างอิงหรือ QR บนสลิป) จึงเลือกรูปซ้ำได้โดยไม่บันทึกซ้ำ สลิปที่ถ่ายก่อนสลิปล่าสุดจะถูกพักไว้ให้เลือกเอง</p>
@@ -1888,6 +1889,7 @@ A.loansTab = (d) => { UI.loansTab = d.v; refresh(); };
 A.fcDays = (d) => { UI.fcDays = Number(d.v); refresh(); };
 A.catLedger = (d) => { UI.catTab.ledger = d.v; refresh(); };
 A.catKind = (d) => { UI.catTab.kind = d.v; refresh(); };
+A.toggleAutoPrompt = () => { S.settings.autoPrompt = S.settings.autoPrompt === false; S.settings.promptSnooze = null; save(); refresh(); };
 A.toggleNwSavings = () => { S.settings.nwIncludeSavings = !S.settings.nwIncludeSavings; save(); refresh(); };
 A.setTheme = (d) => { S.settings.theme = d.v; save(); applyTheme(); refresh(); };
 A.goEvent = (d) => {
@@ -2761,6 +2763,20 @@ function prepForOcr(canvas) {
   g.putImageData(d, 0, 0);
   return canvas;
 }
+// Slips are screenshots on a light background; camera photos are not.
+// Share of light, low-saturation pixels on a tiny copy is a cheap way to skip photos before OCR.
+function lightRatio(img) {
+  const c = drawScaled(img, 90);
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  let light = 0, n = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i], g = d[i + 1], b = d[i + 2];
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    if (mx > 205 && mx - mn < 40) light++;
+    n++;
+  }
+  return n ? light / n : 0;
+}
 function markSeen(hash) {
   if (!hash) return;
   const arr = S.settings.seenHashes;
@@ -2784,16 +2800,29 @@ function parseSlip(raw, qrData) {
   // amount
   let amount = null;
   // 1) a number on the same or next line as an amount label ("฿65.00" may OCR as "B65 00")
+  // "what you actually paid" labels win over list price (e.g. เป๋าตัง: ค่าสินค้า 385, สิทธิ -170, จำนวนเงินที่ชำระ 215)
+  const PAID_KW = /(จำนวนเงินที่ชำระ|ยอดที่ชำระ|ยอดชำระสุทธิ|ยอดสุทธิ|ชำระทั้งหมด|net amount|total paid)/i;
   const AMT_KW = /(จำนวนเงิน|จำนวน|ยอดเงิน|ยอดชำระ|ยอดโอน|ยอดรวม|ยอดสุทธิ|amount|total)/i;
-  const NUM = /(?:฿|thb|\bb)?\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{1,7})(?:\.|,|\s)\s?([0-9]{2})(?![0-9:\/])/i;
-  for (let i = 0; i < lines.length && !amount; i++) {
-    const km = AMT_KW.exec(lines[i]);
-    if (!km || /ค่าธรรมเนียม|fee|คงเหลือ|balance/i.test(lines[i])) continue;
-    for (const chunk of [lines[i].slice(km.index + km[0].length), lines[i + 1] || '', lines[i + 2] || '']) {
-      const nm = NUM.exec(chunk);
-      if (nm) { const v = parseFloat(nm[1].replace(/,/g, '') + '.' + nm[2]); if (v > 0) { amount = v; break; } }
+  // decimals optional: some wallets print "215 บาท"
+  const NUM = /(?:฿|thb|\bb)?\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{1,7})(?:(?:\.|,|\s)\s?([0-9]{2}))?(?![0-9:\/])/i;
+  const scanLabel = (KW) => {
+    for (let i = 0; i < lines.length; i++) {
+      const km = KW.exec(lines[i]);
+      if (!km || /ค่าธรรมเนียม|fee|คงเหลือ|balance|ส่วนลด|สิทธิ/i.test(lines[i])) continue;
+      for (const chunk of [lines[i].slice(km.index + km[0].length), lines[i + 1] || '', lines[i + 2] || '']) {
+        if (/^\s*(ค่าธรรมเนียม|รหัส|เลขที่|วันที่)/.test(chunk)) break;
+        const nm = NUM.exec(chunk);
+        if (nm) {
+          const intPart = nm[1].replace(/,/g, '');
+          if (!nm[2] && /^(19|20|25)\d{2}$/.test(intPart)) continue; // a year, not money
+          const v = parseFloat(intPart + '.' + (nm[2] || '00'));
+          if (v > 0) return v;
+        }
+      }
     }
-  }
+    return null;
+  };
+  amount = scanLabel(PAID_KW) || scanLabel(AMT_KW);
   const am = amount ? null : /(?:จำนวนเงิน|จำนวน|ยอดเงิน|ยอดชำระ|ยอดโอน|ยอดรวม|ยอดสุทธิ|amount|total)[:：]?(?:thb|฿|บาท)?\n?([0-9][0-9,]*\.[0-9]{2})/i.exec(tight);
   if (am) amount = parseFloat(am[1].replace(/,/g, ''));
   if (!amount) {
@@ -2843,18 +2872,24 @@ function parseSlip(raw, qrData) {
 
   // masked account numbers (in order of appearance)
   const accts = [];
-  const flat = tight.replace(/\n/g, ' ');
-  const mre = /[xX*•]{1,}[-xX*•\d]{1,14}|\d{3}-\d-[xX*]{1,5}\d{0,4}/g;
-  let mm;
-  while ((mm = mre.exec(flat))) {
-    const digits = (mm[0].match(/\d+/g) || []).join('');
-    if (digits.length >= 3) { const l4 = digits.slice(-4); if (!accts.includes(l4)) accts.push(l4); }
+  // line by line so digits from the next line never join a masked number;
+  // handles "xxx-x-x4417-x", "XXX-X-XX967-8", "X XXXX XXXX9 84 5", "**** ******* 3752"
+  const mre = /[xX*•]{1,}(?:[-\s]?[xX*•\d]){2,20}|\d{3}-\d-[xX*]{1,5}\d{0,4}/g;
+  for (const ln of lines) {
+    let mm;
+    mre.lastIndex = 0;
+    while ((mm = mre.exec(ln))) {
+      if (!/[xX*•]{2,}|[xX*•][-\s][xX*•]/.test(mm[0])) continue;
+      const digits = (mm[0].match(/\d+/g) || []).join('');
+      if (digits.length >= 3) { const l4 = digits.slice(-4); if (!accts.includes(l4)) accts.push(l4); }
+    }
   }
 
   // channel
   let channel = null;
   if (/truemoney|ทรูมันนี/i.test(tight)) channel = 'truemoney';
   else if (/shopeepay|shopee|ช้อปปี้/i.test(tight)) channel = 'shopee';
+  else if (/เป๋าตัง|paotang|g-?wallet/i.test(tight)) channel = 'paotang';
   else if (/linebk|linepay|rabbitlinepay/i.test(tight)) channel = 'line';
   else if (/k\+|kplus|กสิกร|kasikorn/i.test(tight)) channel = 'kbank';
   else if (/scb|ไทยพาณิชย์/i.test(tight)) channel = 'scb';
@@ -2871,10 +2906,11 @@ function parseSlip(raw, qrData) {
   let receiver = null, senderL = null;
   const TO_RE = /^(ไปยัง|ไปที่|ถึง|ผู้รับเงิน|ผู้รับ|to|pay to|paid to|ชำระให้|จ่ายให้|ร้านค้า|merchant)(?=[\s:：]|$)/i;
   const FROM_RE = /^(จาก|from|ผู้โอน|ผู้ส่ง)(?=[\s:：]|$)/i;
+  const tidy = (s) => (s || '').replace(/^[^A-Za-zก-๙0-9(]+/, '').replace(/[^A-Za-zก-๙0-9).]+$/, '').trim();
   const valueAfter = (clean, re, i) => {
-    const rest = clean.replace(re, '').replace(/^[\s:：]+/, '').trim();
+    const rest = tidy(clean.replace(re, ''));
     if (rest.length >= 2 && !/^[\dxX\-*•\s]+$/.test(rest)) return rest;
-    const nx = lines.slice(i + 1).find((x) => x.length >= 2 && !/^[\dxX\-*•\s.,:]+$/.test(x));
+    const nx = lines.slice(i + 1).map(tidy).find((x) => x.length >= 2 && !/^[\dxX\-*•\s.,:]+$/.test(x));
     return nx || null;
   };
   lines.forEach((ln, i) => {
@@ -2901,8 +2937,8 @@ function classifySlip(p) {
   else if (to) { kind = 'inc'; payWith = to.id; }
   else if (from) { kind = 'exp'; payWith = from.id; }
   if (!from && !to && p.incomeHint) kind = 'inc';
-  if (!payWith && (p.channel === 'truemoney' || p.channel === 'shopee')) {
-    const re = p.channel === 'truemoney' ? /true|ทรู/i : /shopee|ช้อปปี้/i;
+  if (!payWith && (p.channel === 'truemoney' || p.channel === 'shopee' || p.channel === 'paotang')) {
+    const re = p.channel === 'truemoney' ? /true|ทรู/i : p.channel === 'paotang' ? /เป๋าตัง|paotang|g-?wallet/i : /shopee|ช้อปปี้/i;
     const w = S.accounts.find((a) => !a.archived && a.type === 'ewallet' && re.test(a.name));
     if (w) { payWith = w.id; matched = true; }
   }
@@ -2978,6 +3014,11 @@ async function runScan(files) {
         const d = qc.getContext('2d').getImageData(0, 0, qc.width, qc.height);
         const r = jsQR(d.data, d.width, d.height, { inversionAttempts: 'dontInvert' });
         if (r && r.data) qr = r.data;
+      }
+      if (!qr && lightRatio(img) < 0.3) {
+        SCAN.stats.notslip++;
+        SCAN.items.push({ id: uid(), hash, blob: await toBlob(drawScaled(img, 1200), 0.72), status: 'notslip', p: parseSlip('', null), draft: classifySlip(parseSlip('', null)) });
+        continue;
       }
       let text = '';
       if (worker) { const oc = prepForOcr(drawScaled(img, 1600)); const r = await worker.recognize(oc); text = r.data.text || ''; }
@@ -3520,10 +3561,12 @@ let lastActive = Date.now();
 document.addEventListener('visibilitychange', () => {
   if (!S || !S.settings.onboarded) return;
   if (document.hidden) { lastActive = Date.now(); persistNow(); return; }
-  if (S.settings.pinHash && !LOCK && Date.now() - lastActive >= (S.settings.lockAfter || 0) * 60000) showLock();
+  const ask = () => setTimeout(maybeScanPrompt, 400);
+  const willLock = S.settings.pinHash && !LOCK && Date.now() - lastActive >= (S.settings.lockAfter || 0) * 60000;
   const n = autoPostInstallments();
   if (n) { changed(); toast(`บันทึกงวดผ่อนผ่านบัตรอัตโนมัติ ${n} งวด`); }
   if (!Sheets.length) refresh();
+  if (willLock) showLock(ask); else if (!LOCK) ask();
 });
 
 /* ---------- data management actions ---------- */
@@ -3618,6 +3661,25 @@ function handleUrlAction() {
   }
 }
 
+/* ---------- ask for new slips when the app opens ----------
+   iOS never lets a web app read the photo library on its own, so the
+   closest thing to automatic is: open the app, one tap, pick the bank's album. */
+function maybeScanPrompt() {
+  const s = S.settings;
+  if (s.autoPrompt === false || !S.accounts.length || Sheets.length || LOCK || s.promptSnooze === dkey(new Date())) return;
+  if (s.lastScanAt && new Date() - parseD(s.lastScanAt) < 2 * 3600e3) return;
+  A._spGo = () => { closeSheet(); A.scan(); };
+  A._spLater = () => { closeSheet(); };
+  A._spSnooze = () => { s.promptSnooze = dkey(new Date()); save(); closeSheet(); };
+  openSheet(() => `${sheetHead('มีสลิปใหม่ไหม')}
+    <p class="text-[14px] muted leading-relaxed">${s.lastScanAt ? `สแกนครั้งก่อน ${esc(dayLabel(s.lastScanAt).split(',')[0])} ${fmtTime(s.lastScanAt)} ` : ''}แตะปุ่มด้านล่าง แล้วเลือกรูปสลิปได้หลายรูปพร้อมกัน แอปจะข้ามรูปที่เคยสแกนแล้วและรูปที่ไม่ใช่สลิปให้เอง</p>
+    <button class="btn btn-primary mt-4" style="height:56px" data-a="_spGo" data-h>${ic('photo', 20)}เลือกรูปสลิปใหม่</button>
+    <div class="mt-4 rounded-2xl p-3 text-[13px] leading-relaxed" style="background:var(--soft);color:var(--ink-2)">
+      <b>วิธีเลือกเร็วที่สุด</b><br>ในหน้าเลือกรูป แตะ <b>คอลเลกชั่น</b> แล้วเปิดอัลบั้มของแอปธนาคาร เช่น Krungthai NEXT, MAKE by KBank หรือเป๋าตัง จากนั้นลากนิ้วผ่านรูปแถวบนสุดเพื่อเลือกหลายรูปรวดเดียว เลือกเกินมาก็ได้ สลิปที่บันทึกแล้วจะไม่ถูกบันทึกซ้ำ
+    </div>
+    <div class="grid grid-cols-2 gap-2 mt-3"><button class="btn btn-soft" style="height:44px;font-size:14px" data-a="_spLater">ไว้ทีหลัง</button><button class="btn btn-soft" style="height:44px;font-size:14px" data-a="_spSnooze">ไม่ต้องถามวันนี้</button></div>`, { label: 'สแกนสลิปใหม่' });
+}
+
 /* ---------- boot ---------- */
 window.addEventListener('error', (e) => { console.error(e.error || e.message); });
 window.addEventListener('unhandledrejection', (e) => { console.error(e.reason); });
@@ -3633,7 +3695,9 @@ async function boot() {
   if (n) changed();
   render('fade');
   const after = () => {
+    const hadAction = new URLSearchParams(location.search).has('action');
     handleUrlAction();
+    if (!hadAction) setTimeout(maybeScanPrompt, 500);
     if (n) toast(`บันทึกงวดผ่อนผ่านบัตรอัตโนมัติ ${n} งวด`);
     updateBadge();
     const lb = S.settings.lastBackupAt ? parseD(S.settings.lastBackupAt) : null;
