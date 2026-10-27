@@ -798,8 +798,10 @@ function netWorth(ledger = 'personal') {
   const loans = S.loans.filter((l) => (l.ledger || 'personal') === ledger);
   const recv = sum(loans.filter((l) => l.dir === 'lend'), loanLeft);
   const borrow = sum(loans.filter((l) => l.dir === 'borrow'), loanLeft);
-  const assets = r2(liquid + credit + recv + (withSaved ? saved : 0)), liabilities = r2(owed + inst + borrow);
-  return { liquid: r2(liquid), saved: r2(saved), withSaved, owed: r2(owed), credit: r2(credit), inst, recv, borrow, assets, liabilities, net: r2(assets - liabilities) };
+  // money lent out is shown separately; it joins assets only if the user opts in
+  const withLent = !!S.settings.nwIncludeLent;
+  const assets = r2(liquid + credit + (withLent ? recv : 0) + (withSaved ? saved : 0)), liabilities = r2(owed + inst + borrow);
+  return { liquid: r2(liquid), saved: r2(saved), withSaved, withLent, owed: r2(owed), credit: r2(credit), inst, recv, borrow, assets, liabilities, net: r2(assets - liabilities) };
 }
 
 /* ---------- emergency fund: savings ÷ average monthly spending (last 3 full months) ---------- */
@@ -1569,7 +1571,8 @@ function homePersonal() {
       <span class="flex flex-col"><span class="tiny muted">สินทรัพย์</span><span class="text-[16px] font-semibold amt-inc">${fmt(nw.assets)}</span></span>
       <span class="flex flex-col text-right"><span class="tiny muted">หนี้สิน</span><span class="text-[16px] font-semibold amt-exp">${fmt(nw.liabilities)}</span></span>
     </span>
-    <span class="block tiny muted mt-2">บัตร ${fmt(nw.owed)} ผ่อนคงเหลือ ${fmt(nw.inst)} ยืมมา ${fmt(nw.borrow)} ให้ยืม ${fmt(nw.recv)}</span>
+    <span class="block tiny muted mt-2">บัตร ${fmt(nw.owed)} ผ่อนคงเหลือ ${fmt(nw.inst)} ยืมมา ${fmt(nw.borrow)}${nw.withLent ? ` ให้ยืม ${fmt(nw.recv)}` : ''}</span>
+    ${nw.recv && !nw.withLent ? `<span class="mt-2 flex items-center gap-2 rounded-xl px-3 py-2.5 text-[13px]" style="background:var(--soft)">${ic('hand', 16)}<span class="flex-1">ให้ยืม แยกไว้ ไม่รวมในยอดนี้</span><b>${fmt(nw.recv)}</b></span>` : ''}
     ${nw.saved ? (() => { const em = emergencyInfo(); const m = em.months; const tone = m === null ? 'var(--muted)' : m >= 6 ? 'var(--inc)' : m >= 3 ? 'var(--inc)' : 'var(--warn)'; return `<span class="mt-2 block rounded-xl px-3 py-2.5 text-[13px]" style="background:var(--soft)">
       <span class="flex items-center gap-2">${ic('piggy', 16)}<span class="flex-1">เงินเก็บ ${nw.withSaved ? 'รวมอยู่ในยอดนี้' : 'แยกไว้ ไม่รวมในยอดนี้'}</span><b>${fmt(nw.saved)}</b></span>
       ${m !== null ? `<span class="flex justify-between mt-1.5"><span style="color:${tone};font-weight:600">พอใช้ฉุกเฉิน ${m >= 10 ? Math.round(m) : m.toFixed(1)} เดือน</span><span class="muted">แนะนำ 3–6 เดือน</span></span>
@@ -1758,7 +1761,7 @@ SCREENS.wallets = () => {
   return `
   <header class="pt-3 flex items-end justify-between"><h1 class="text-[30px] font-bold tracking-tight">บัญชีและบัตร</h1><button class="iconbtn" data-a="accForm" aria-label="เพิ่มบัญชีหรือบัตร">${ic('plus', 22, 2)}</button></header>
   <div class="grid grid-cols-2 gap-2.5 mt-3">
-    <div class="card px-4 py-3"><span class="tiny muted">สินทรัพย์${nw.saved && !nw.withSaved ? ' (ไม่รวมเงินเก็บ)' : ''}</span><p class="text-[18px] font-bold amt-inc">${fmt(nw.assets)}</p></div>
+    <div class="card px-4 py-3"><span class="tiny muted">สินทรัพย์${(() => { const x = [nw.saved && !nw.withSaved ? 'เงินเก็บ' : '', nw.recv && !nw.withLent ? 'เงินให้ยืม' : ''].filter(Boolean); return x.length ? ` (ไม่รวม${x.join('และ')})` : ''; })()}</span><p class="text-[18px] font-bold amt-inc">${fmt(nw.assets)}</p></div>
     <div class="card px-4 py-3"><span class="tiny muted">หนี้สินทั้งหมด</span><p class="text-[18px] font-bold amt-exp">${fmt(nw.liabilities)}</p></div>
   </div>
   <section class="mt-4"><div class="flex justify-between px-1"><h2 class="sec m-0">เงินในบัญชี วอลเล็ต และเงินสด</h2><span class="text-[13px] font-semibold" style="color:var(--ink-2)">${fmt(nw.liquid)}</span></div>
@@ -1884,6 +1887,7 @@ SCREENS.menu = () => {
     ${row('scanSettings', 'ชวนสแกนสลิป', promptMode() === 'evening' ? 'สรุปทุกวัน ' + (S.settings.promptTime || '20:00') : promptMode() === 'every' ? 'ทุกครั้งที่เปิดแอป' : 'ไม่ถาม', 'scan')}
     ${row('shortcuts', 'ทางลัดและเสียง', 'เปิดเร็ว สแกน และพูดเพื่อจด', 'mic')}
     <div class="row"><span class="tile sm" style="background:var(--soft);color:var(--ink-2)">${ic('piggy', 17)}</span><span class="flex-1 min-w-0 flex flex-col"><span class="text-[15px]">นับเงินเก็บในความมั่งคั่งสุทธิ</span><span class="tiny muted">ยอดเงินที่ใช้ได้และคาดการณ์เงินไม่รวมเงินเก็บเสมอ</span></span>${switchBtn(!!S.settings.nwIncludeSavings, 'toggleNwSavings', 'นับเงินเก็บในความมั่งคั่งสุทธิ')}</div>
+    <div class="row"><span class="tile sm" style="background:var(--soft);color:var(--ink-2)">${ic('hand', 17)}</span><span class="flex-1 min-w-0 flex flex-col"><span class="text-[15px]">นับเงินให้ยืมในความมั่งคั่งสุทธิ</span><span class="tiny muted">ปิดไว้ = แสดงแยก ไม่รวมในสินทรัพย์</span></span>${switchBtn(!!S.settings.nwIncludeLent, 'toggleNwLent', 'นับเงินให้ยืมในความมั่งคั่งสุทธิ')}</div>
     ${row('security', 'ล็อกแอป', S.settings.pinHash ? (S.settings.faceCred ? 'รหัส PIN และ Face ID' : 'รหัส PIN') : 'ยังไม่ได้ตั้ง', 'lock')}
     <div class="row"><span class="tile sm" style="background:var(--soft);color:var(--ink-2)">${ic('sun', 17)}</span><span class="flex-1 text-[15px]">ธีม</span><div style="width:190px">${seg([['light', 'สว่าง'], ['dark', 'มืด'], ['auto', 'อัตโนมัติ']], S.settings.theme, 'setTheme')}</div></div>
   </div></section>
@@ -2288,6 +2292,7 @@ A.reconcileSave = () => {
 };
 A.setPromptMode = (d) => { S.settings.promptMode = d.v; S.settings.promptSnooze = null; save(); refresh(); };
 IN.promptTime = (el) => { if (el.value) { S.settings.promptTime = el.value; save(); } };
+A.toggleNwLent = () => { S.settings.nwIncludeLent = !S.settings.nwIncludeLent; save(); refresh(); };
 A.toggleNwSavings = () => { S.settings.nwIncludeSavings = !S.settings.nwIncludeSavings; save(); refresh(); };
 A.setTheme = (d) => { S.settings.theme = d.v; save(); applyTheme(); refresh(); };
 A.goEvent = (d) => {
