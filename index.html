@@ -632,7 +632,9 @@ async function deleteTxn(id) {
 function txnsSorted(filter) {
   return S.txns.filter(filter || (() => true)).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt));
 }
-const KIND_LABEL = { exp: 'รายจ่าย', inc: 'รายรับ', tr: 'โอนย้าย', loan: 'ยืม-คืน', adj: 'ปรับยอด' };
+const KIND_LABEL = { exp: 'รายจ่าย', inc: 'รายรับ', tr: 'โอนย้าย', loan: 'ยืม-คืน', adj: 'ดุลยอด' };
+// pseudo-category: saves as a balance adjustment (kind 'adj'), which no income, expense, budget, chart or tax total counts
+const ADJ_CAT = '__adj';
 
 /* ---------- credit cards ---------- */
 function stmtDateOnOrBefore(a, d) {
@@ -974,7 +976,7 @@ const TxnModel = {
   // returns a list of problems; empty means the record can be saved
   validate(r) {
     const e = [];
-    if (!(Number.isFinite(r.amount) && r.amount > 0)) e.push('จำนวนเงินต้องมากกว่า 0');
+    if (!(Number.isFinite(r.amount) && (r.kind === 'adj' ? r.amount !== 0 : r.amount > 0))) e.push('จำนวนเงินต้องมากกว่า 0');
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(r.date || '')) e.push('วันเวลาไม่ถูกต้อง');
     const a = acc(r.accountId);
     if (r.kind !== 'loan' && !a) e.push('เลือกบัญชีก่อน');
@@ -1425,7 +1427,7 @@ function txSub(t) {
   const parts = [];
   if (t.kind === 'tr') parts.push(`โอน ${accName(t.accountId)} ไป ${accName(t.toAccountId)}`);
   else if (t.kind === 'loan') { const l = S.loans.find((x) => x.id === t.loanId); parts.push(l ? (l.dir === 'lend' ? (t.loanRole === 'open' ? 'ให้ยืม' : 'รับคืน') : (t.loanRole === 'open' ? 'ยืมมา' : 'คืนเงิน')) : 'ยืม-คืน'); if (t.accountId) parts.push(accName(t.accountId)); }
-  else if (t.kind === 'adj') parts.push('ปรับยอดให้ตรง', accName(t.accountId));
+  else if (t.kind === 'adj') parts.push('ดุลยอด ไม่นับเป็นรายรับรายจ่าย', accName(t.accountId));
   else {
     const c = cat(t.categoryId);
     if (c) parts.push(c.name);
@@ -2374,10 +2376,11 @@ function renderTxnForm() {
     rows = accRow('จาก', pw, 'tfPay', pw ? (isLiab(pw) ? 'ค้าง ' + fmt(Math.max(0, -bal(pw.id))) : 'คงเหลือ ' + fmt(bal(pw.id))) : '') +
       accRow('ไปที่', to, 'tfTo', to ? (isLiab(to) ? 'ยอดค้าง ' + fmt(Math.max(0, -bal(to.id))) : 'คงเหลือ ' + fmt(bal(to.id))) : '');
   } else {
-    rows = accRow(t.kind === 'exp' ? 'จ่ายด้วย' : 'รับเข้า', pw, 'tfPay', pw ? (isLiab(pw) ? 'ค้าง ' + fmt(Math.max(0, -bal(pw.id))) : 'คงเหลือ ' + fmt(bal(pw.id))) : '');
-    if (t.kind === 'exp' && pw && pw.type === 'ewallet') rows += accRow('ตัดเงินจริง', ff || { name: 'ยอดใน ' + pw.name, type: 'ewallet', color: pw.color, mark: accMark(pw) }, 'tfFund', ff ? `จ่ายผ่าน ${esc(pw.name)} แต่ตัดจาก ${esc(ff.name)}` : 'ใช้เงินที่อยู่ในวอลเล็ต');
+    rows = accRow(t.categoryId === ADJ_CAT ? 'บัญชี' : t.kind === 'exp' ? 'จ่ายด้วย' : 'รับเข้า', pw, 'tfPay', pw ? (isLiab(pw) ? 'ค้าง ' + fmt(Math.max(0, -bal(pw.id))) : 'คงเหลือ ' + fmt(bal(pw.id))) : '');
+    if (t.kind === 'exp' && t.categoryId !== ADJ_CAT && pw && pw.type === 'ewallet') rows += accRow('ตัดเงินจริง', ff || { name: 'ยอดใน ' + pw.name, type: 'ewallet', color: pw.color, mark: accMark(pw) }, 'tfFund', ff ? `จ่ายผ่าน ${esc(pw.name)} แต่ตัดจาก ${esc(ff.name)}` : 'ใช้เงินที่อยู่ในวอลเล็ต');
   }
   const cats = t.kind === 'tr' ? [] : catsFor(t.kind, ledger);
+  const isAdj = t.categoryId === ADJ_CAT;
   const purposes = ['ชำระบัตร', 'เติมวอลเล็ต', 'ย้ายเงินเก็บ', 'ถอนเงินสด'];
   const plans = S.installments.filter((p) => !p.archived && !instDone(p) && (acc(p.accountId) || {}).ledger === ledger);
   const loans = S.loans.filter((l) => (l.ledger || 'personal') === ledger && loanLeft(l) > 0);
@@ -2397,9 +2400,10 @@ function renderTxnForm() {
   ${amtNum < 0 ? `<p class="text-center tiny amt-exp mt-1">ผลลัพธ์ติดลบ แก้ตัวเลขก่อนบันทึก</p>` : ''}
   ${t.kind === 'tr' && pw && to && isLiab(to) ? `<p class="text-center tiny muted mt-1">จ่ายบิลบัตรนับเป็นการโอนย้าย ไม่นับเป็นรายจ่ายซ้ำ</p>` : ''}
   <div class="list mt-4">${rows}</div>
-  ${t.kind !== 'tr' ? `<div class="chips mt-3" role="radiogroup" aria-label="หมวดหมู่">${cats.map((c) => `<button class="chip ${t.categoryId === c.id ? 'on' : ''}" role="radio" aria-checked="${t.categoryId === c.id}" data-a="tfCat" data-id="${c.id}"><span class="dot" style="background:${(PALETTE[c.color] || PALETTE[9]).c}"></span>${esc(c.name)}</button>`).join('')}<button class="chip soft" data-a="tfNewCat">${ic('plus', 15, 2.2)}หมวดใหม่</button></div>`
+  ${t.kind !== 'tr' ? `<div class="chips mt-3" role="radiogroup" aria-label="หมวดหมู่">${cats.map((c) => `<button class="chip ${t.categoryId === c.id ? 'on' : ''}" role="radio" aria-checked="${t.categoryId === c.id}" data-a="tfCat" data-id="${c.id}"><span class="dot" style="background:${(PALETTE[c.color] || PALETTE[9]).c}"></span>${esc(c.name)}</button>`).join('')}<button class="chip ${isAdj ? 'on' : ''}" role="radio" aria-checked="${isAdj}" data-a="tfCat" data-id="${ADJ_CAT}">${ic('edit', 14, 2)}ดุลยอด</button><button class="chip soft" data-a="tfNewCat">${ic('plus', 15, 2.2)}หมวดใหม่</button></div>`
     : `<div class="chips mt-3">${purposes.map((p) => `<button class="chip ${t.note === p ? 'on' : ''}" data-a="tfPurpose" data-v="${p}">${p}</button>`).join('')}</div>`}
-  ${t.kind === 'exp' ? `<div class="wrapchips mt-2.5">
+  ${isAdj ? `<p class="mt-2.5 rounded-xl px-3 py-2.5 text-[13px] leading-relaxed" style="background:var(--soft);color:var(--ink-2)">ดุลยอด: ${t.kind === 'exp' ? 'ลด' : 'เพิ่ม'}ยอดเงินใน${pw ? ' ' + esc(pw.name) : 'บัญชี'}เท่านั้น ไม่นับเป็น${t.kind === 'exp' ? 'รายจ่าย' : 'รายรับ'} ไม่เข้างบประมาณ กราฟ หรือภาษี</p>` : ''}
+  ${t.kind === 'exp' && !isAdj ? `<div class="wrapchips mt-2.5">
     <button class="chip soft ${t.showDisc ? 'on' : ''}" style="height:34px;font-size:13px" data-a="tfDiscToggle">${ic('gift', 14, 2)}${t.discount > 0 ? `${esc(t.discountLabel)} ${fmt(t.discount)}` : 'ได้ส่วนลดหรือสิทธิ'}</button>
     ${!t.id && ledger === 'personal' && !t.link ? `<button class="chip soft ${t.split ? 'on' : ''}" style="height:34px;font-size:13px" data-a="tfSplit">${ic('users', 14, 2)}${t.split ? `หาร ${t.split.people.length + 1} คน ส่วนเรา ${fmt(splitMine(amtNum, t.split))}` : 'หารบิล'}</button>` : ''}
     ${ledger === 'personal' ? `<button class="chip soft ${t.tax ? 'on' : ''}" style="height:34px;font-size:13px" data-a="tfTax" aria-pressed="${t.tax}">${ic('file', 14, 2)}ลดหย่อนภาษี</button>` : ''}
@@ -2407,20 +2411,20 @@ function renderTxnForm() {
   ${t.showDisc ? `<div class="list mt-2"><label class="field"><span class="lbl">ประเภทส่วนลด</span><select data-c="tfDiscLabel">${['ไทยช่วยไทยพลัส', 'คนละครึ่ง', 'คูปอง', 'ส่วนลด'].map((x) => `<option ${t.discountLabel === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
     <label class="field"><span class="lbl">ได้ลดไป</span><input type="number" inputmode="decimal" step="0.01" value="${t.discount || ''}" placeholder="0.00" data-c="tfDiscAmt"></label></div>
     <p class="tiny muted mt-1 px-1">ยอดด้านบนคือเงินที่จ่ายจริง ส่วนลดเก็บแยกไว้ดูว่าประหยัดได้เท่าไร</p>` : ''}` : ''}
-  ${members.length ? `<div class="mt-3 card p-3"><div class="flex justify-between items-center"><span class="text-[13px] muted">รับจากสมาชิก</span><input type="month" class="bg-transparent outline-none text-right" style="font-size:15px" value="${t.period}" data-c="tfPeriod" aria-label="รอบเดือน"></div>
+  ${members.length && !isAdj ? `<div class="mt-3 card p-3"><div class="flex justify-between items-center"><span class="text-[13px] muted">รับจากสมาชิก</span><input type="month" class="bg-transparent outline-none text-right" style="font-size:15px" value="${t.period}" data-c="tfPeriod" aria-label="รอบเดือน"></div>
     <div class="wrapchips mt-2">${members.map((m) => `<button class="chip soft ${t.memberId === m.id ? 'on' : ''}" style="height:34px" data-a="tfMember" data-id="${m.id}">${esc(m.name)}</button>`).join('')}</div></div>` : ''}
   <div class="list mt-3">
     <label class="field"><span class="lbl">วันเวลา</span><input type="datetime-local" value="${t.date}" data-c="tfDate" aria-label="วันเวลา"></label>
     <label class="field"><span class="lbl">${t.kind === 'inc' ? 'รับจาก' : t.kind === 'exp' ? 'ร้านหรือผู้รับ' : 'รายละเอียด'}</span><input type="text" value="${esc(t.merchant)}" placeholder="ไม่บังคับ" data-i="tfMerchant" data-c="tfMerchantDone" autocomplete="off" list="merchantList"></label>
     ${sg ? `<div class="field" style="align-items:flex-start;padding:8px 0"><span class="lbl" style="color:var(--brand)">${ic('repeat', 14, 2)} แนะนำ</span><span class="flex-1 min-w-0 flex flex-col items-end text-right"><span class="text-[14px]">${[sg.categoryId && sg.categoryId !== t.categoryId ? esc(cat(sg.categoryId).name) : '', sg.accountId && sg.accountId !== t.payWith ? esc(accName(sg.accountId)) : ''].filter(Boolean).join(' · ')}</span><span class="tiny muted">จากประวัติ ${sg.n} ครั้ง ล่าสุด ${esc(fmtDate(sg.last, { year: false }))}</span></span><button class="chip soft" style="height:32px;margin-left:8px" data-a="tfApplySg">ใช้</button></div>` : ''}
     <label class="field"><span class="lbl">โน้ต</span><input type="text" value="${esc(t.note)}" placeholder="ไม่บังคับ" data-i="tfNote" autocomplete="off"></label>
-    ${linkOpts.length ? `<label class="field"><span class="lbl">ผูกกับ</span><select data-c="tfLink"><option value="">ไม่ผูก</option>${linkOpts.map(([v, l]) => `<option value="${v}" ${t.link === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>` : ''}
+    ${linkOpts.length && !isAdj ? `<label class="field"><span class="lbl">ผูกกับ</span><select data-c="tfLink"><option value="">ไม่ผูก</option>${linkOpts.map(([v, l]) => `<option value="${v}" ${t.link === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>` : ''}
     <div class="field"><span class="lbl">รูปสลิป</span><span class="flex-1 flex justify-end items-center gap-2">${t.slipId || t.slipBlob ? `<button class="chip soft" style="height:32px" data-a="tfViewSlip">ดูรูป</button><button class="chip soft" style="height:32px;color:var(--exp)" data-a="tfRemoveSlip">เอาออก</button>` : `<button class="chip soft" style="height:32px" data-a="tfAttach">${ic('photo', 15, 2)}แนบรูป</button>`}</span></div>
   </div>
   ${t.ref ? `<p class="tiny muted mt-2 px-1">เลขอ้างอิง ${esc(t.ref)}</p>` : ''}
   <div style="position:sticky;bottom:calc(-1 * (env(safe-area-inset-bottom, 0px) + 16px));margin:12px -18px 0;padding:10px 18px calc(env(safe-area-inset-bottom, 0px) + 16px);background:var(--bg);box-shadow:0 -10px 16px -12px rgba(0,0,0,.18);z-index:2">
     <div class="keypad" style="gap:7px;grid-template-columns:repeat(4,minmax(0,1fr))">${KEYPAD.map(([k, label, aria]) => `<button class="key" style="height:44px;${'+-='.includes(k) && k ? 'background:var(--soft);color:var(--brand);font-weight:600' : ''}${k === 'del' ? 'background:var(--soft)' : ''}" data-a="tfKey" data-k="${k}" aria-label="${aria}">${k === 'del' ? ic('chevL', 22, 2) : label}</button>`).join('')}</div>
-    <button class="btn mt-2.5 ${t.kind === 'exp' ? 'btn-exp' : t.kind === 'inc' ? 'btn-inc' : 'btn-primary'}" data-a="tfSave" data-h ${amtNum > 0 ? '' : 'disabled'}>${t.id ? 'บันทึกการแก้ไข' : t.kind === 'exp' ? 'บันทึกรายจ่าย' : t.kind === 'inc' ? 'บันทึกรายรับ' : (to && isLiab(to) ? 'บันทึกการชำระหนี้' : 'บันทึกการโอน')}${calc && amtNum > 0 ? ' ' + fmt(amtNum) : ''}</button>
+    <button class="btn mt-2.5 ${t.kind === 'exp' ? 'btn-exp' : t.kind === 'inc' ? 'btn-inc' : 'btn-primary'}" data-a="tfSave" data-h ${amtNum > 0 ? '' : 'disabled'}>${t.id ? 'บันทึกการแก้ไข' : isAdj ? 'บันทึกดุลยอด' : t.kind === 'exp' ? 'บันทึกรายจ่าย' : t.kind === 'inc' ? 'บันทึกรายรับ' : (to && isLiab(to) ? 'บันทึกการชำระหนี้' : 'บันทึกการโอน')}${calc && amtNum > 0 ? ' ' + fmt(amtNum) : ''}</button>
   </div>
   <datalist id="merchantList">${Suggest.recentMerchants().map((m) => `<option value="${esc(m)}"></option>`).join('')}</datalist>`;
 }
@@ -2464,6 +2468,7 @@ const TxnVM = {
     const rec = { kind: t.kind, ledger: t.ledger, amount, date: t.date, merchant: t.merchant.trim(), note: t.note.trim(), slipId, ref: t.ref || '', source: t.source,
       accountId: t.payWith, toAccountId: null, viaId: null, categoryId: null, memberId: null, period: null, installmentId: null };
     if (t.kind === 'tr') { rec.toAccountId = t.toAccountId; return rec; }
+    if (t.categoryId === ADJ_CAT) return { ...rec, kind: 'adj', amount: t.kind === 'exp' ? -amount : amount, note: rec.note || 'ดุลยอด', discount: 0, discountLabel: null, tax: false };
     rec.categoryId = t.categoryId;
     if (t.kind === 'exp' && t.fundFrom && acc(t.payWith) && acc(t.payWith).type === 'ewallet') { rec.accountId = t.fundFrom; rec.viaId = t.payWith; }
     if (t.kind === 'exp' && t.keepVia) rec.viaId = t.keepVia;
@@ -2486,7 +2491,7 @@ A.tfKey = (d, el) => {
 };
 A.tfKind = (d) => {
   TF.kind = d.v; TF.link = '';
-  if (d.v !== 'tr') { if (!cat(TF.categoryId) || cat(TF.categoryId).kind !== d.v) TF.categoryId = (catsFor(d.v, TF.ledger)[0] || {}).id || null; }
+  if (d.v !== 'tr') { if (TF.categoryId !== ADJ_CAT && (!cat(TF.categoryId) || cat(TF.categoryId).kind !== d.v)) TF.categoryId = (catsFor(d.v, TF.ledger)[0] || {}).id || null; }
   else if (!TF.toAccountId || TF.toAccountId === TF.payWith) TF.toAccountId = (accountsFor(TF.ledger, (a) => a.id !== TF.payWith)[0] || {}).id || null;
   if (d.v === 'inc' && acc(TF.payWith) && isLiab(acc(TF.payWith))) TF.payWith = defaultAccountFor(TF.ledger, 'inc');
   refreshSheet();
@@ -2513,7 +2518,7 @@ A.tfTo = () => openAccountPicker({
   ledger: TF.ledger, title: 'โอนไปที่', current: TF.toAccountId, filter: (a) => a.id !== TF.payWith,
   onPick: (id) => { TF.toAccountId = id; if (acc(id) && isLiab(acc(id)) && !TF.note) TF.note = 'ชำระบัตร'; refreshSheet(); }
 });
-A.tfCat = (d) => { TF.categoryId = d.id; TF.catTouched = true; if (!TF.taxTouched && !TF.id) TF.tax = TAX_CATS.includes(d.id); refreshSheet(); };
+A.tfCat = (d) => { TF.categoryId = d.id; TF.catTouched = true; if (d.id === ADJ_CAT) { TF.link = ''; TF.split = null; TF.tax = false; TF.discount = 0; TF.showDisc = false; } if (!TF.taxTouched && !TF.id) TF.tax = TAX_CATS.includes(d.id); refreshSheet(); };
 A.tfDiscToggle = () => { TF.showDisc = !TF.showDisc; if (!TF.showDisc) TF.discount = 0; refreshSheet(); };
 IN.tfDiscLabel = (el) => { TF.discountLabel = el.value; };
 IN.tfDiscAmt = (el) => { TF.discount = r2(parseFloat(el.value) || 0); refreshSheet(); };
@@ -2583,7 +2588,7 @@ A.tfSave = async () => {
     if (old && !rec.installmentId && old.installmentId && t.kind === 'exp') rec.installmentId = old.installmentId;
     saved = updateTxn(t.id, rec);
   } else {
-    const r = commitWithSplit(rec, t.kind === 'exp' ? t.split : null);
+    const r = commitWithSplit(rec, rec.kind === 'exp' ? t.split : null);
     saved = r.t; made = r.loans;
   }
   if (t.source === 'slip' && t.slipHash) markSeen(t.slipHash);
@@ -2684,6 +2689,10 @@ A.openTxn = (d) => {
     const viaWallet = t.viaId && acc(t.viaId) && acc(t.viaId).type === 'ewallet';
     openTxnForm({ id: t.id, kind: t.kind, ledger: t.ledger, amount: t.amount, payWith: viaWallet ? t.viaId : t.accountId, fundFrom: viaWallet ? t.accountId : null, toAccountId: t.toAccountId, categoryId: t.categoryId, date: t.date, merchant: t.merchant, note: t.note, ref: t.ref, slipId: t.slipId, memberId: t.memberId, period: t.period || mkey(parseD(t.date)), source: t.source, discount: t.discount, discountLabel: t.discountLabel, tax: !!t.tax, keepVia: !viaWallet && t.viaId ? t.viaId : null });
     if (t.installmentId) toast('รายการนี้เป็นงวดผ่อน ' + ((S.installments.find((p) => p.id === t.installmentId) || {}).name || ''));
+    return;
+  }
+  if (t.kind === 'adj' && t.accountId) {
+    openTxnForm({ id: t.id, kind: t.amount < 0 ? 'exp' : 'inc', ledger: t.ledger, amount: Math.abs(t.amount), payWith: t.accountId, categoryId: ADJ_CAT, date: t.date, merchant: t.merchant, note: t.note, ref: t.ref, slipId: t.slipId, source: t.source });
     return;
   }
   A._delOther = async () => { const ok = await confirmSheet({ title: 'ลบรายการนี้', body: 'ยอดคงเหลือและยอดค้างจะถูกคำนวณใหม่', ok: 'ลบรายการ', danger: true }); if (ok) { await deleteTxn(t.id); closeAllSheets(); refresh(); toast('ลบแล้ว'); } };
