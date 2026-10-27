@@ -3610,6 +3610,22 @@ function parseSlip(raw, qrData) {
 
 /* ---------- turn a parsed slip into a draft transaction ---------- */
 const BANK_NAME_RE = { kbank: /kbank|k-?bank|กสิกร|k\+|kplus/i, scb: /scb|ไทยพาณิชย์/i, ktb: /ktb|กรุงไทย|krungthai/i, bbl: /bbl|กรุงเทพ|bualuang|bangkok/i, bay: /krungsri|กรุงศรี|\bbay\b/i, ttb: /ttb|ทีทีบี|ทหารไทย|ธนชาต/i, gsb: /gsb|ออมสิน|mymo/i };
+// no account number matched: choose among accounts whose name says the slip's bank (e.g. "KBank (ทั่วไป)" for a K+ slip)
+function pickBankAccount(bank) {
+  const hits = S.accounts.filter((a) => !a.archived && a.type === 'bank' && BANK_NAME_RE[bank].test(a.name));
+  if (!hits.length) return null;
+  const learnt = (S.settings.slipBank || {})[bank];
+  const h = hits.find((a) => a.id === learnt);
+  if (h) return h;                                            // the account picked last time for this bank's slips
+  const spend = hits.filter((a) => !a.savings && a.ledger === 'personal');
+  const pool = spend.length ? spend : hits;
+  if (pool.length === 1) return pool[0];
+  const d = pool.find((a) => a.id === S.settings.defaultAccount);
+  if (d) return d;
+  const since = dkey(addDays(new Date(), -90));
+  const use = (a) => S.txns.filter((t) => t.accountId === a.id && t.kind === 'exp' && t.date >= since).length;
+  return pool.slice().sort((x, y) => use(y) - use(x))[0];      // the one used most for spending lately
+}
 function classifySlip(p) {
   const findAcc = (l4) => S.accounts.find((a) => !a.archived && a.last4 && (a.last4 === l4 || (l4.length >= 3 && a.last4.endsWith(l4)) || (a.last4.length >= 3 && l4.endsWith(a.last4))));
   let from = null, to = null;
@@ -3620,10 +3636,7 @@ function classifySlip(p) {
   else if (to) { kind = 'inc'; payWith = to.id; }
   else if (from) { kind = 'exp'; payWith = from.id; }
   if (!from && !to && p.incomeHint) kind = 'inc';
-  if (!payWith && kind !== 'inc' && p.channel && BANK_NAME_RE[p.channel]) {
-    const cands = S.accounts.filter((a) => !a.archived && a.type === 'bank' && BANK_NAME_RE[p.channel].test(a.name));
-    if (cands.length === 1 || (cands.length > 1 && cands.find((a) => a.id === S.settings.defaultAccount))) payWith = (cands.find((a) => a.id === S.settings.defaultAccount) || cands[0]).id;
-  }
+
   if (!payWith && (p.channel === 'truemoney' || p.channel === 'shopee' || p.channel === 'paotang')) {
     const re = p.channel === 'truemoney' ? /true|ทรู/i : p.channel === 'paotang' ? /เป๋าตัง|paotang|g-?wallet/i : /shopee|ช้อปปี้/i;
     const w = S.accounts.find((a) => !a.archived && a.type === 'ewallet' && re.test(a.name));
@@ -3635,11 +3648,8 @@ function classifySlip(p) {
   }
   const merchant = (kind === 'inc' ? p.sender : p.receiver || (p.names.length === 1 ? null : p.sender)) || '';
   const sg = merchant ? suggestFor(merchant) : null;
-  if (!payWith && kind !== 'inc' && p.bank) {
-    // no account number matched: use the only account whose name says this bank (e.g. "KBank เงินเดือน" for a K+ slip)
-    const hits = S.accounts.filter((a) => !a.archived && a.type === 'bank' && BANK_NAME_RE[p.bank].test(a.name));
-    if (hits.length === 1) { payWith = hits[0].id; matched = true; }
-  }
+  const bankKey = p.bank || (BANK_NAME_RE[p.channel] ? p.channel : null);
+  if (!payWith && kind !== 'inc' && bankKey) { const a = pickBankAccount(bankKey); if (a) { payWith = a.id; matched = true; } }
   if (!payWith && sg && sg.accountId) payWith = sg.accountId;
   if (!payWith) payWith = kind === 'inc' ? defaultAccountFor('personal', 'inc') : (S.settings.defaultAccount || defaultAccountFor('personal', 'exp'));
   const pa = acc(payWith);
@@ -3666,7 +3676,7 @@ function classifySlip(p) {
   }
   const date = p.date ? tkey(p.date) : tkey(new Date());
   const conf = p.amount && p.amountSure !== false && p.date && !p.dateGuess && matched && (kind === 'tr' || catSure) ? 'high' : 'check';
-  return { kind, amount: p.amountSure === false ? 0 : (p.amount || 0), amountGuess: p.amountSure === false ? p.amount : null, noDate: !p.date, learn4: kind === 'exp' && p.accts[0] && !matched ? p.accts[0] : null, date, dateGuess: !!p.dateGuess, merchant, payWith, fundFrom, toAccountId: toAcc, categoryId, ledger, memberId, period: mkey(parseD(date)), note: '', ref: p.ref || '', conf, matched: from || to ? (from || to).last4 : null, channel: p.channel,
+  return { kind, amount: p.amountSure === false ? 0 : (p.amount || 0), amountGuess: p.amountSure === false ? p.amount : null, noDate: !p.date, learn4: kind === 'exp' && p.accts[0] && !S.accounts.some((a) => a.last4 && a.last4.endsWith(p.accts[0])) ? p.accts[0] : null, bank: bankKey, date, dateGuess: !!p.dateGuess, merchant, payWith, fundFrom, toAccountId: toAcc, categoryId, ledger, memberId, period: mkey(parseD(date)), note: '', ref: p.ref || '', conf, matched: from || to ? (from || to).last4 : null, channel: p.channel,
     discount: kind === 'exp' ? (p.discount || 0) : 0, discountLabel: kind === 'exp' ? p.discountLabel : null, gross: p.gross };
 }
 
@@ -3960,6 +3970,7 @@ async function saveDraft(it) {
   if (payer && !payer.last4 && l4 && d.kind !== 'inc' && payer.type === 'bank' && !S.accounts.some((a) => a.last4 && a.last4.endsWith(l4))) { payer.last4 = l4; toast(`จำเลขท้าย ${l4} ให้ ${payer.name} แล้ว สลิปครั้งหน้าจะเลือกบัญชีให้เอง`); }
   markSeen(it.hash, 'saved');
   const pa = acc(d.payWith);
+  if (d.bank && pa && pa.type === 'bank' && BANK_NAME_RE[d.bank] && BANK_NAME_RE[d.bank].test(pa.name)) (S.settings.slipBank || (S.settings.slipBank = {}))[d.bank] = pa.id;
   if (d.learn4 && pa && pa.type === 'bank' && !pa.last4 && !S.accounts.some((a) => a.last4 && a.last4.endsWith(d.learn4))) { pa.last4 = d.learn4; toast(`จำเลขท้าย ${d.learn4} ให้ ${pa.name} แล้ว ครั้งหน้าจะเลือกบัญชีนี้เอง`); }
   if (!S.settings.lastSlipAt || d.date > S.settings.lastSlipAt) S.settings.lastSlipAt = d.date;
   it.status = 'saved';
