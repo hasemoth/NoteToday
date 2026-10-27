@@ -249,7 +249,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
    Part 1: utilities, icons, storage, state, defaults
    ============================================================ */
 const APP_NAME = 'Slipbook';
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.3.0';
 
 /* ---------- small utilities ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -3325,6 +3325,20 @@ function binarize(canvas, invert) {
   g.putImageData(d, 0, 0);
   return canvas;
 }
+// keep only dark, grey (unsaturated) pixels: slip text is grey, a photo or pattern behind it is coloured or mid-tone
+function grayTextMask(canvas, invert) {
+  const g = canvas.getContext('2d', { willReadFrequently: true });
+  const d = g.getImageData(0, 0, canvas.width, canvas.height), p = d.data;
+  for (let i = 0; i < p.length; i += 4) {
+    let r = p[i], gg = p[i + 1], b = p[i + 2];
+    if (invert) { r = 255 - r; gg = 255 - gg; b = 255 - b; }
+    const y = 0.299 * r + 0.587 * gg + 0.114 * b, sat = Math.max(r, gg, b) - Math.min(r, gg, b);
+    const v = y < 115 && sat < 45 ? 0 : 255;
+    p[i] = p[i + 1] = p[i + 2] = v;
+  }
+  g.putImageData(d, 0, 0);
+  return canvas;
+}
 const slipQuality = (p) => (p.amount && p.amountSure ? 1 : 0) + (p.date && !p.dateGuess ? 1 : 0) + (p.hasTime ? 0.5 : 0) + (p.accts.length ? 0.5 : 0) + (p.ref && !/^QR/.test(p.ref) ? 0.5 : 0) + (p.receiver ? 0.5 : 0);
 // take each field from whichever reading is more certain about it
 function mergeSlips(a, b) {
@@ -3379,6 +3393,7 @@ function markSeen(hash, why) {
 const MONTH_PAT = '(มกราคม|กุมภาพันธ์|มีนาคม|เมษายน|พฤษภาคม|มิถุนายน|กรกฎาคม|สิงหาคม|กันยายน|ตุลาคม|พฤศจิกายน|ธันวาคม|มค|กพ|มีค|เมย|พค|มิย|กค|สค|กย|ตค|พย|ธค|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*';
 const MONTH_IDX = { มกราคม: 0, กุมภาพันธ์: 1, มีนาคม: 2, เมษายน: 3, พฤษภาคม: 4, มิถุนายน: 5, กรกฎาคม: 6, สิงหาคม: 7, กันยายน: 8, ตุลาคม: 9, พฤศจิกายน: 10, ธันวาคม: 11, มค: 0, กพ: 1, มีค: 2, เมย: 3, พค: 4, มิย: 5, กค: 6, สค: 7, กย: 8, ตค: 9, พย: 10, ธค: 11, jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
 function normYear(y) { y = Number(y); if (y < 100) y = y >= 40 ? 2500 + y : 2000 + y; if (y > 2400) y -= 543; return y; }
+const BANK_RE = { kbank: /k\+|kplus|กสิกร|kasikorn|kbank/i, ktb: /กรุงไทย|krungthai|ktb/i, scb: /ไทยพาณิชย์|scb/i, bbl: /กรุงเทพ|bangkokbank|bualuang/i, bay: /กรุงศรี|krungsri/i, ttb: /ทีทีบี|ttb|ทหารไทย/i, gsb: /ออมสิน|mymo|gsb/i };
 function parseSlip(raw, qrData) {
   // OCR often splits sara am (ำ) into nikhahit + sara aa; normalise so keywords match
   const text = String(raw || '').replace(/\r/g, '').replace(/ํ\s*า/g, 'ำ').replace(/[๐-๙]/g, (c) => '๐๑๒๓๔๕๖๗๘๙'.indexOf(c));
@@ -3500,8 +3515,8 @@ function parseSlip(raw, qrData) {
 
   // reference
   let ref = null;
-  const rm = /(?:เลขที่รายการ|รหัสอ้างอิง|หมายเลขอ้างอิง|เลขอ้างอิง|เลขที่อ้างอิง|รหัสรายการ|หมายเลขรายการ|เลขที่คำสั่งซื้อ|ref(?:erence)?(?:no|id|code)?|transactionid|transactionno|txnid|orderid)[.:：#]*\n?([a-z0-9]{6,})/i.exec(tight);
-  if (rm) ref = rm[1].toUpperCase();
+  const rm = /(?:เลขที่รายการ|รหัส[อฮ]้?างอิง|หมายเลขอ้างอิง|เลขอ้างอิง|เลขที่อ้างอิง|รหัสรายการ|หมายเลขรายการ|เลขที่คำสั่งซื้อ|ref(?:erence)?(?:no|id|code)?|transactionid|transactionno|txnid|orderid)[.:：#]*\n?([a-z0-9]{6,})/i.exec(tight);
+  if (rm && (rm[1].match(/\d/g) || []).length >= 4) ref = rm[1].toUpperCase();   // "หมายเลขอ้างอิง LINEPay" is a label, not a code
   if (!ref && /เลขที่|อ้างอิง|รายการ|ref/i.test(tight)) {
     // label split from its value: take the longest long code on the slip
     const codes = (text.match(/[A-Za-z0-9]{12,}/g) || []).filter((c) => (c.match(/\d/g) || []).length >= 8 && !/^(19|20|25)\d{6}$/.test(c));
@@ -3538,6 +3553,8 @@ function parseSlip(raw, qrData) {
   else if (/ttb|ทหารไทย|ทีเอ็มบีธนชาต/i.test(tight)) channel = 'ttb';
   else if (/ออมสิน|mymo|gsb/i.test(tight)) channel = 'gsb';
   const promptpay = /พร้อมเพย์|promptpay/i.test(tight);
+  let bank = null, bankAt = Infinity;
+  for (const [k, re] of Object.entries(BANK_RE)) { const m = re.exec(tight); if (m && m.index < bankAt) { bank = k; bankAt = m.index; } }
 
   // names
   const NAME_RE = /^(นาย|นางสาว|นาง|น\.ส\.|ด\.ช\.|ด\.ญ\.|บจก|บริษัท|หจก|ร้าน|mr\.?|mrs\.?|ms\.?|miss)\s*\S/i;
@@ -3545,7 +3562,7 @@ function parseSlip(raw, qrData) {
   let receiver = null, senderL = null;
   const TO_RE = /^(ไปยัง|ไปที่|ถึง|ผู้รับเงิน|ผู้รับ|to|pay to|paid to|ชำระให้|จ่ายให้|ร้านค้า|merchant)(?=[\s:：]|$)/i;
   const FROM_RE = /^(จาก|from|ผู้โอน|ผู้ส่ง)(?=[\s:：]|$)/i;
-  const tidy = (s) => (s || '').replace(/^[^A-Za-zก-๙0-9(]+/, '').replace(/[^A-Za-zก-๙0-9).]+$/, '').trim();
+  const tidy = (s) => (s || '').replace(/^[^A-Za-zก-๙0-9(]+/, '').replace(/[^A-Za-zก-๙0-9).]+$/, '').replace(/^น[ูุ]\.\s?ส\./, 'น.ส.').trim();
   const valueAfter = (clean, re, i) => {
     const rest = tidy(clean.replace(re, ''));
     if (rest.length >= 2 && !/^[\dxX\-*•\s]+$/.test(rest)) return rest;
@@ -3553,7 +3570,7 @@ function parseSlip(raw, qrData) {
     return nx || null;
   };
   lines.forEach((ln, i) => {
-    const clean = ln.replace(/^[^A-Za-zก-๙]+/, '');
+    const clean = ln.replace(/^[^A-Za-zก-๙]+/, '').replace(/^น[ูุ]\.\s?ส\./, 'น.ส.');
     if (NAME_RE.test(clean) && !names.includes(clean)) names.push(clean);
     if (!receiver && TO_RE.test(clean)) receiver = valueAfter(clean, TO_RE, i);
     if (!senderL && FROM_RE.test(clean)) senderL = valueAfter(clean, FROM_RE, i);
@@ -3569,14 +3586,30 @@ function parseSlip(raw, qrData) {
       if (rest[1] && !/สินค้า|บริการ|บาท|\d/.test(rest[1])) catHint = rest[1];
     }
   }
+  if (!receiver && names.length < 2) {
+    // no title (นาย/น.ส.) read: the line above each masked account, skipping the bank or PromptPay line, is a name
+    const isMask = (l) => /[xX*%#]{2,}.*\d{3,}|\d{3,}.*[xX*%#]{2,}/.test(l);
+    const BANKLINE = /^(ธ\.|ธนาคาร|บัญชี|รหัสพร้อมเพย์|พร้อมเพย์|promptpay|เบอร์|เลขที่|wallet)/i;
+    const cand = [];
+    lines.forEach((l, i) => {
+      if (!isMask(l)) return;
+      for (let k = i - 1; k >= Math.max(0, i - 2); k--) {
+        const t = tidy(lines[k].replace(/^(\S{1,3}\s+)+(?=\S{4,})/, ''));
+        if (BANKLINE.test(t) || isMask(t) || !/[ก-๙]{3,}/.test(t) || /สำเร็จ|โอนเงิน|จำนวน|\d{1,2}:\d{2}/.test(t)) continue;
+        cand.push(t); break;
+      }
+    });
+    if (cand.length >= 2) { if (!names.length) names.push(cand[0]); if (!names.includes(cand[1])) names.push(cand[1]); }
+  }
   const sender = senderL || names.find((n) => n !== receiver) || null;
   if (!receiver) receiver = names.find((n) => n !== sender) || null;
   const incomeHint = /(ได้รับเงิน|รับเงินสำเร็จ|เงินเข้า|received|youreceived|เติมเงินเข้า)/i.test(tight);
   const isSlip = !!amount && score >= 2;
-  return { amount: amount ? r2(amount) : null, amountSure, gross, discount: r2(discount), discountLabel, date, dateGuess, hasTime, ref, accts, channel, promptpay, sender, receiver, names, catHint, incomeHint, isSlip, score, tight, lines };
+  return { amount: amount ? r2(amount) : null, amountSure, bank, gross, discount: r2(discount), discountLabel, date, dateGuess, hasTime, ref, accts, channel, promptpay, sender, receiver, names, catHint, incomeHint, isSlip, score, tight, lines };
 }
 
 /* ---------- turn a parsed slip into a draft transaction ---------- */
+const BANK_NAME_RE = { kbank: /kbank|k-?bank|กสิกร|k\+|kplus/i, scb: /scb|ไทยพาณิชย์/i, ktb: /ktb|กรุงไทย|krungthai/i, bbl: /bbl|กรุงเทพ|bualuang|bangkok/i, bay: /krungsri|กรุงศรี|\bbay\b/i, ttb: /ttb|ทีทีบี|ทหารไทย|ธนชาต/i, gsb: /gsb|ออมสิน|mymo/i };
 function classifySlip(p) {
   const findAcc = (l4) => S.accounts.find((a) => !a.archived && a.last4 && (a.last4 === l4 || (l4.length >= 3 && a.last4.endsWith(l4)) || (a.last4.length >= 3 && l4.endsWith(a.last4))));
   let from = null, to = null;
@@ -3587,6 +3620,10 @@ function classifySlip(p) {
   else if (to) { kind = 'inc'; payWith = to.id; }
   else if (from) { kind = 'exp'; payWith = from.id; }
   if (!from && !to && p.incomeHint) kind = 'inc';
+  if (!payWith && kind !== 'inc' && p.channel && BANK_NAME_RE[p.channel]) {
+    const cands = S.accounts.filter((a) => !a.archived && a.type === 'bank' && BANK_NAME_RE[p.channel].test(a.name));
+    if (cands.length === 1 || (cands.length > 1 && cands.find((a) => a.id === S.settings.defaultAccount))) payWith = (cands.find((a) => a.id === S.settings.defaultAccount) || cands[0]).id;
+  }
   if (!payWith && (p.channel === 'truemoney' || p.channel === 'shopee' || p.channel === 'paotang')) {
     const re = p.channel === 'truemoney' ? /true|ทรู/i : p.channel === 'paotang' ? /เป๋าตัง|paotang|g-?wallet/i : /shopee|ช้อปปี้/i;
     const w = S.accounts.find((a) => !a.archived && a.type === 'ewallet' && re.test(a.name));
@@ -3598,6 +3635,11 @@ function classifySlip(p) {
   }
   const merchant = (kind === 'inc' ? p.sender : p.receiver || (p.names.length === 1 ? null : p.sender)) || '';
   const sg = merchant ? suggestFor(merchant) : null;
+  if (!payWith && kind !== 'inc' && p.bank) {
+    // no account number matched: use the only account whose name says this bank (e.g. "KBank เงินเดือน" for a K+ slip)
+    const hits = S.accounts.filter((a) => !a.archived && a.type === 'bank' && BANK_NAME_RE[p.bank].test(a.name));
+    if (hits.length === 1) { payWith = hits[0].id; matched = true; }
+  }
   if (!payWith && sg && sg.accountId) payWith = sg.accountId;
   if (!payWith) payWith = kind === 'inc' ? defaultAccountFor('personal', 'inc') : (S.settings.defaultAccount || defaultAccountFor('personal', 'exp'));
   const pa = acc(payWith);
@@ -3624,7 +3666,7 @@ function classifySlip(p) {
   }
   const date = p.date ? tkey(p.date) : tkey(new Date());
   const conf = p.amount && p.amountSure !== false && p.date && !p.dateGuess && matched && (kind === 'tr' || catSure) ? 'high' : 'check';
-  return { kind, amount: p.amount || 0, date, dateGuess: !!p.dateGuess, merchant, payWith, fundFrom, toAccountId: toAcc, categoryId, ledger, memberId, period: mkey(parseD(date)), note: '', ref: p.ref || '', conf, matched: from || to ? (from || to).last4 : null, channel: p.channel,
+  return { kind, amount: p.amountSure === false ? 0 : (p.amount || 0), amountGuess: p.amountSure === false ? p.amount : null, noDate: !p.date, learn4: kind === 'exp' && p.accts[0] && !matched ? p.accts[0] : null, date, dateGuess: !!p.dateGuess, merchant, payWith, fundFrom, toAccountId: toAcc, categoryId, ledger, memberId, period: mkey(parseD(date)), note: '', ref: p.ref || '', conf, matched: from || to ? (from || to).last4 : null, channel: p.channel,
     discount: kind === 'exp' ? (p.discount || 0) : 0, discountLabel: kind === 'exp' ? p.discountLabel : null, gross: p.gross };
 }
 
@@ -3675,7 +3717,12 @@ async function runScan(files, force) {
         const r = jsQR(d.data, d.width, d.height, { inversionAttempts: 'dontInvert' });
         if (r && r.data) qr = r.data;
       }
-      if (!qr && !looksLikeScreenshot(img)) {
+      // photo-like picture without a QR: a quick low-resolution read decides, since some slips have a photo behind the text
+      let quickSlip = false;
+      if (!qr && !looksLikeScreenshot(img) && worker) {
+        try { const r0 = await worker.recognize(prepForOcr(drawScaled(img, 900), false)); quickSlip = parseSlip(r0.data.text || '', null).score >= 2; } catch (e) { /* treat as photo */ }
+      }
+      if (!qr && !quickSlip && !looksLikeScreenshot(img)) {
         SCAN.stats.notslip++;
         SCAN.items.push({ id: uid(), hash, blob: await toBlob(drawScaled(img, 1200), 0.72), status: 'notslip', p: parseSlip('', null), draft: classifySlip(parseSlip('', null)) });
         continue;
@@ -3685,11 +3732,12 @@ async function runScan(files, force) {
       if (worker) { const r = await worker.recognize(prepForOcr(drawScaled(img, 1600), dark)); text = r.data.text || ''; }
       let p = parseSlip(text, qr);
       // slips with a photo or pattern behind the text read badly; a second pass on a black-and-white copy usually fixes them
-      if (worker && slipQuality(p) < 3) {
+      for (const extra of [grayTextMask, binarize]) {
+        if (!worker || slipQuality(p) >= 3.5) break;
         try {
-          const r2 = await worker.recognize(binarize(drawScaled(img, 1600), dark));
+          const r2 = await worker.recognize(extra(drawScaled(img, 1600), dark));
           p = mergeSlips(p, parseSlip(r2.data.text || '', qr));
-        } catch (e) { /* keep the first reading */ }
+        } catch (e) { /* keep what was read so far */ }
       }
       const thumb = await toBlob(drawScaled(img, 1200), 0.72);
       if (!p.isSlip && !(qr && !worker)) { SCAN.stats.notslip++; SCAN.items.push({ id: uid(), hash, blob: thumb, status: 'notslip', p, draft: classifySlip(p) }); continue; }
@@ -3791,7 +3839,7 @@ function renderReview() {
       <div class="flex gap-3.5">
         <button data-a="reviewZoom" aria-label="ดูรูปสลิปเต็มจอ" style="flex:none"><img class="thumb" src="${it.url}" alt="รูปสลิป"></button>
         <div class="flex-1 min-w-0 flex flex-col">
-          <div class="flex flex-wrap gap-1.5">${d.conf === 'high' ? `<span class="pill" style="background:var(--inc-tint);color:var(--inc)">${ic('check', 12, 3)}อ่านได้ครบ</span>` : `<span class="pill" style="background:var(--warn-tint);color:var(--warn)">ตรวจอีกครั้ง</span>`}${it.older ? `<span class="pill" style="background:var(--soft);color:var(--ink-2)">ก่อนครั้งล่าสุด</span>` : ''}${d.dateGuess ? `<span class="pill" style="background:var(--warn-tint);color:var(--warn)">ตรวจเดือนอีกครั้ง</span>` : ''}${d.ledger === 'common' ? `<span class="pill" style="background:var(--brand-tint);color:var(--brand)">ส่วนกลาง</span>` : ''}</div>
+          <div class="flex flex-wrap gap-1.5">${d.conf === 'high' ? `<span class="pill" style="background:var(--inc-tint);color:var(--inc)">${ic('check', 12, 3)}อ่านได้ครบ</span>` : `<span class="pill" style="background:var(--warn-tint);color:var(--warn)">ตรวจอีกครั้ง</span>`}${it.older ? `<span class="pill" style="background:var(--soft);color:var(--ink-2)">ก่อนครั้งล่าสุด</span>` : ''}${!d.amount ? `<span class="pill" style="background:var(--exp-tint);color:var(--exp)">อ่านยอดไม่ได้ ใส่เอง</span>` : ''}${d.noDate ? `<span class="pill" style="background:var(--exp-tint);color:var(--exp)">อ่านวันที่ไม่ได้</span>` : d.dateGuess ? `<span class="pill" style="background:var(--warn-tint);color:var(--warn)">ตรวจเดือนอีกครั้ง</span>` : ''}${d.ledger === 'common' ? `<span class="pill" style="background:var(--brand-tint);color:var(--brand)">ส่วนกลาง</span>` : ''}</div>
           <label class="text-[13px] muted mt-1.5" for="rvAmt">จำนวนเงิน</label>
           <div class="flex items-baseline gap-1"><span class="text-[22px] font-semibold muted">฿</span><input id="rvAmt" data-i="rvAmt" inputmode="decimal" value="${d.amount ? fmtPlain(d.amount).replace(/,/g, '') : ''}" placeholder="0.00" class="w-full bg-transparent outline-none border-0 font-bold tracking-tight" style="font-size:30px;padding:0"></div>
           <div class="mt-1">${seg([['exp', 'จ่าย'], ['inc', 'รับ'], ['tr', 'โอน']], d.kind, 'rvKind')}</div>
@@ -3907,7 +3955,12 @@ async function saveDraft(it) {
     if (d.kind === 'exp' && d.ledger === 'personal') rec.tax = !!d.tax;
   }
   commitWithSplit(rec, d.kind === 'exp' && d.ledger === 'personal' ? d.split : null);
+  // the first masked number on an outgoing slip is the payer: remember it on that account so the next slip matches by itself
+  const payer = acc(d.payWith), l4 = it.p && it.p.accts && it.p.accts[0];
+  if (payer && !payer.last4 && l4 && d.kind !== 'inc' && payer.type === 'bank' && !S.accounts.some((a) => a.last4 && a.last4.endsWith(l4))) { payer.last4 = l4; toast(`จำเลขท้าย ${l4} ให้ ${payer.name} แล้ว สลิปครั้งหน้าจะเลือกบัญชีให้เอง`); }
   markSeen(it.hash, 'saved');
+  const pa = acc(d.payWith);
+  if (d.learn4 && pa && pa.type === 'bank' && !pa.last4 && !S.accounts.some((a) => a.last4 && a.last4.endsWith(d.learn4))) { pa.last4 = d.learn4; toast(`จำเลขท้าย ${d.learn4} ให้ ${pa.name} แล้ว ครั้งหน้าจะเลือกบัญชีนี้เอง`); }
   if (!S.settings.lastSlipAt || d.date > S.settings.lastSlipAt) S.settings.lastSlipAt = d.date;
   it.status = 'saved';
   save();
